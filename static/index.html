@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Medical Document Q&A</title>
+  <style>
+    :root {
+      --ink: #1c2430;
+      --muted: #5c6774;
+      --line: #d9d1c3;
+      --paper: #f6f1e8;
+      --card: #fffdf8;
+      --teal: #0e5c5c;
+      --teal-dark: #0a3f40;
+      --warn: #7a3e12;
+      --warn-bg: #f8ecdf;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font: 16px/1.5 "Segoe UI", "Helvetica Neue", sans-serif;
+    }
+    header, main { width: min(1100px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 28px 0 8px; }
+    h1 { font-family: Georgia, "Iowan Old Style", serif; font-size: 2rem; margin: 0 0 6px; letter-spacing: -0.02em; }
+    .lede { margin: 0; color: var(--muted); max-width: 62ch; }
+    .banner {
+      margin: 16px 0 0;
+      padding: 10px 12px;
+      background: var(--warn-bg);
+      color: var(--warn);
+      border-left: 4px solid var(--warn);
+    }
+    main { display: grid; grid-template-columns: 280px 1fr; gap: 20px; padding: 20px 0 48px; }
+    .panel, .answer, .composer, .source {
+      background: var(--card);
+      border: 1px solid var(--line);
+    }
+    .panel, .thread { padding: 16px; }
+    h2 { font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 10px; color: var(--muted); }
+    ul { list-style: none; padding: 0; margin: 0 0 14px; }
+    li { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 0.95rem; }
+    button, .file-label {
+      display: inline-block;
+      background: var(--teal);
+      color: white;
+      border: 0;
+      padding: 8px 12px;
+      cursor: pointer;
+      font: inherit;
+    }
+    button.secondary, .file-label { background: transparent; color: var(--teal-dark); border: 1px solid var(--teal); }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    .stack { display: flex; flex-wrap: wrap; gap: 8px; }
+    .meta { color: var(--muted); font-size: 0.85rem; margin-top: 12px; }
+    .thread { min-height: 420px; display: flex; flex-direction: column; gap: 12px; }
+    .empty { color: var(--muted); margin: auto; text-align: center; max-width: 46ch; }
+    .bubble { padding: 12px 14px; border: 1px solid var(--line); }
+    .bubble.user { background: #e7f2f2; }
+    .bubble .who { font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+    .composer { display: flex; gap: 8px; padding: 12px; margin-top: 12px; }
+    textarea { flex: 1; resize: vertical; min-height: 64px; border: 1px solid var(--line); padding: 10px; font: inherit; background: white; }
+    .sources { display: grid; gap: 8px; margin-top: 8px; }
+    .source { padding: 10px 12px; }
+    .source header { width: auto; display: flex; justify-content: space-between; gap: 12px; padding: 0; font-size: 0.85rem; }
+    .source p { margin: 8px 0 0; white-space: pre-wrap; color: var(--muted); font-size: 0.9rem; }
+    .error { color: var(--warn); }
+    @media (max-width: 800px) {
+      main { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Medical Document Q&A</h1>
+    <p class="lede">Ask a question. The app embeds it, searches the FAISS index, and answers only from the retrieved excerpts.</p>
+    <p class="banner">Educational demo. Answers are limited to the uploaded documents and are not a diagnosis, a prescription, or personal medical advice.</p>
+  </header>
+  <main>
+    <aside class="panel">
+      <h2>Indexed documents</h2>
+      <ul id="docs"></ul>
+      <div class="stack">
+        <button id="rebuild" type="button">Rebuild index</button>
+        <label class="file-label">
+          Add file
+          <input id="upload" type="file" accept=".pdf,.md,.txt,.text" hidden />
+        </label>
+      </div>
+      <p class="meta" id="status">Checking index…</p>
+    </aside>
+    <section>
+      <div class="thread" id="thread">
+        <p class="empty" id="empty">Try “What sodium limit does the blood pressure handout suggest?” or “When does the asthma handout say to get emergency help?”</p>
+      </div>
+      <form class="composer" id="ask-form">
+        <textarea id="question" name="question" placeholder="Ask about the indexed documents" required></textarea>
+        <button type="submit" id="send">Ask</button>
+      </form>
+    </section>
+  </main>
+  <script>
+    const docsEl = document.getElementById("docs");
+    const statusEl = document.getElementById("status");
+    const thread = document.getElementById("thread");
+    const empty = document.getElementById("empty");
+    const form = document.getElementById("ask-form");
+    const questionEl = document.getElementById("question");
+    const send = document.getElementById("send");
+    const rebuild = document.getElementById("rebuild");
+    const upload = document.getElementById("upload");
+    const history = [];
+
+    function setBusy(busy) {
+      send.disabled = busy;
+      rebuild.disabled = busy;
+      upload.disabled = busy;
+    }
+
+    async function refreshStatus() {
+      statusEl.className = "meta";
+      const response = await fetch("/api/status");
+      const data = await response.json();
+      docsEl.replaceChildren();
+      if (!data.documents.length) {
+        const item = document.createElement("li");
+        item.textContent = "No documents yet";
+        docsEl.append(item);
+      }
+      for (const name of data.documents) {
+        const item = document.createElement("li");
+        item.textContent = name;
+        docsEl.append(item);
+      }
+      const chunks = data.chunk_count == null ? "not loaded" : data.chunk_count;
+      const key = data.api_key_configured ? "Gemini key found" : "Gemini key missing — set GEMINI_API_KEY in .env";
+      statusEl.textContent = `${key}. ${data.embedding_model} → FAISS → ${data.chat_model}. Chunks: ${chunks}.`;
+    }
+
+    function addBubble(role, text, sources) {
+      if (empty.isConnected) empty.remove();
+      const bubble = document.createElement("article");
+      bubble.className = `bubble ${role}`;
+      const who = document.createElement("div");
+      who.className = "who";
+      who.textContent = role === "user" ? "You" : "From the documents";
+      const body = document.createElement("div");
+      body.textContent = text;
+      bubble.append(who, body);
+      if (sources && sources.length) {
+        const list = document.createElement("div");
+        list.className = "sources";
+        for (const source of sources) {
+          const card = document.createElement("article");
+          card.className = "source";
+          const head = document.createElement("header");
+          const title = document.createElement("strong");
+          title.textContent = `${source.source} · chunk ${source.chunk_index}`;
+          const score = document.createElement("span");
+          score.textContent = `relevance ${source.score}`;
+          head.append(title, score);
+          const excerpt = document.createElement("p");
+          excerpt.textContent = source.text.slice(0, 420);
+          card.append(head, excerpt);
+          list.append(card);
+        }
+        bubble.append(list);
+      }
+      thread.append(bubble);
+      bubble.scrollIntoView({ block: "nearest" });
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const question = questionEl.value.trim();
+      if (!question) return;
+      addBubble("user", question);
+      questionEl.value = "";
+      setBusy(true);
+      try {
+        const response = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question, history: history.slice(-4) }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          addBubble("assistant", data.detail || "The request failed.");
+          return;
+        }
+        addBubble("assistant", data.answer, data.sources);
+        history.push({ role: "user", content: question }, { role: "assistant", content: data.answer });
+      } catch (error) {
+        addBubble("assistant", "Could not reach the server.");
+      } finally {
+        setBusy(false);
+        refreshStatus();
+      }
+    });
+
+    rebuild.addEventListener("click", async () => {
+      setBusy(true);
+      statusEl.textContent = "Embedding documents and rebuilding FAISS…";
+      try {
+        const response = await fetch("/api/ingest", { method: "POST" });
+        const data = await response.json();
+        await refreshStatus();
+        if (!response.ok) {
+          statusEl.textContent = data.detail || "Ingest failed.";
+          statusEl.className = "meta error";
+        }
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    upload.addEventListener("change", async () => {
+      const file = upload.files[0];
+      if (!file) return;
+      const body = new FormData();
+      body.append("file", file);
+      setBusy(true);
+      statusEl.textContent = "Uploading and reindexing…";
+      try {
+        const response = await fetch("/api/upload", { method: "POST", body });
+        const data = await response.json();
+        await refreshStatus();
+        if (!response.ok) {
+          statusEl.textContent = data.detail || "Upload failed.";
+          statusEl.className = "meta error";
+        }
+      } finally {
+        upload.value = "";
+        setBusy(false);
+      }
+    });
+
+    refreshStatus();
+  </script>
+</body>
+</html>
